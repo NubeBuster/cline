@@ -149,8 +149,11 @@ export interface SdkCloudSessionCoordinatorOptions {
 	setTask: (task: TaskProxy | undefined) => void
 	onAskResponse: (text?: string, images?: string[], files?: string[]) => Promise<void>
 	onCancelTask: () => Promise<void>
-	/** Ends the current task view (local or cloud) before a cloud task is installed. */
-	clearTask: () => Promise<void>
+	/**
+	 * Ends the current task view (local or cloud) before a cloud task is
+	 * installed, and returns the fence of the task-view claim it made.
+	 */
+	clearTask: () => Promise<() => boolean>
 	/**
 	 * A cloud start failed before it had a session and `task` now shows the
 	 * error. The controller keeps `input` so the footer's Retry runs it again.
@@ -884,10 +887,11 @@ export class SdkCloudSessionCoordinator {
 		cancelSignal: AbortSignal,
 	): Promise<string | undefined> {
 		if (this.disposed || generation !== this.scopeGeneration || startGeneration !== this.startGeneration) return undefined
-		// clearTask bumps the task-view generation itself, so claim ours after it.
-		await this.options.clearTask()
-		if (this.disposed || generation !== this.scopeGeneration || startGeneration !== this.startGeneration) return undefined
-		let isSuperseded = this.options.claimTaskViewGeneration()
+		// Keep the claim clearTask made: claiming again after the await would
+		// override a selection the user made while the view was clearing.
+		let isSuperseded = await this.options.clearTask()
+		if (this.disposed || isSuperseded() || generation !== this.scopeGeneration || startGeneration !== this.startGeneration)
+			return undefined
 		let abandoned = false
 		const isStale = () => {
 			abandoned ||=
@@ -1084,12 +1088,13 @@ export class SdkCloudSessionCoordinator {
 		}
 		const historyItem = sessionHistoryRecordToHistoryItem(record)
 
-		// clearTask bumps the task-view generation itself, so claim ours after it.
-		await this.options.clearTask()
-		const isSuperseded = this.options.claimTaskViewGeneration()
+		// Keep the claim clearTask made: claiming again after the await would
+		// override a selection the user made while the view was clearing.
+		const isSuperseded = await this.options.clearTask()
 		const generation = this.scopeGeneration
 		const isStale = () =>
 			this.disposed || isSuperseded() || generation !== this.scopeGeneration || this.entries.get(sessionId) !== entry
+		if (isStale()) return historyItem
 
 		// Pin the host so a concurrent status resolution or idle sweep does not
 		// close it between connecting and installing the task that owns it.
