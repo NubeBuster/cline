@@ -354,9 +354,11 @@ export class SdkCloudSessionCoordinator {
 		if (this.scopeTransition) return []
 		const generation = this.scopeGeneration
 		// The pending start's own task row already stands for its sandbox.
-		const entries = [...this.entries.values()].filter((entry) => entry.record.id !== this.pendingStartSessionId)
+		const pendingStartSessionId = this.pendingStartSessionId
+		const entries = [...this.entries.values()].filter((entry) => entry.record.id !== pendingStartSessionId)
 		await this.refreshUsage(entries)
-		if (generation !== this.scopeGeneration) {
+		// A start that settled meanwhile has invalidated History; omitting its row now would be cached as current.
+		if (generation !== this.scopeGeneration || pendingStartSessionId !== this.pendingStartSessionId) {
 			return this.listHistoryRecords()
 		}
 		return entries.map((entry) => this.toHistoryRecord(entry))
