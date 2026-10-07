@@ -207,6 +207,12 @@ export class SdkCloudSessionCoordinator {
 	private pendingStartSessionId: string | undefined
 	/** The task view the pending start installed, once it has one. */
 	private pendingStartTask: TaskProxy | undefined
+	/**
+	 * Re-claims the task view for the pending start when the user returns to it,
+	 * so a selection made in between is rejected. False once the start has seen
+	 * that it lost the view and is cleaning up.
+	 */
+	private renewPendingStartView: (() => boolean) | undefined
 	/** The one recommendation fetch started for the composer label; see warmRecommendedModels. */
 	private recommendedModelsWarmup: Promise<unknown> | undefined
 	private scopeTransition: Promise<void> | undefined
@@ -807,6 +813,7 @@ export class SdkCloudSessionCoordinator {
 		const pendingStart = new AbortController()
 		this.pendingStart = pendingStart
 		this.pendingStartTask = undefined
+		this.renewPendingStartView = undefined
 		// Snapshot the model now, before any await: it is what the composer was
 		// showing when the user submitted.
 		const modelId = this.nextCloudModelId()
@@ -827,6 +834,9 @@ export class SdkCloudSessionCoordinator {
 					this.pendingStart = undefined
 					this.pendingStartSessionId = undefined
 					this.pendingStartTask = undefined
+					this.renewPendingStartView = undefined
+					// History omitted this start's record while it was pending.
+					this.options.invalidateHistoryCache()
 					// The failure path posts state while the start is still pending;
 					// re-post so the composer no longer sees "provisioning".
 					this.options.postStateToWebview().catch(() => {})
@@ -848,6 +858,7 @@ export class SdkCloudSessionCoordinator {
 		this.pendingStart = undefined
 		this.pendingStartSessionId = undefined
 		this.pendingStartTask = undefined
+		this.renewPendingStartView = undefined
 		this.startGeneration++
 		pendingStart.abort(new Error("Cloud task cancelled while provisioning"))
 		return true
@@ -874,13 +885,22 @@ export class SdkCloudSessionCoordinator {
 		// clearTask bumps the task-view generation itself, so claim ours after it.
 		await this.options.clearTask()
 		if (this.disposed || generation !== this.scopeGeneration || startGeneration !== this.startGeneration) return undefined
-		const isSuperseded = this.options.claimTaskViewGeneration()
-		const isStale = () =>
-			this.disposed || isSuperseded() || generation !== this.scopeGeneration || startGeneration !== this.startGeneration
+		let isSuperseded = this.options.claimTaskViewGeneration()
+		let abandoned = false
+		const isStale = () => {
+			abandoned ||=
+				this.disposed || isSuperseded() || generation !== this.scopeGeneration || startGeneration !== this.startGeneration
+			return abandoned
+		}
 		const startedAt = Date.now()
 		const provisionalId = `${CLOUD_PROVISIONING_ID_PREFIX}${startedAt}`
 		const task = this.installTask(provisionalId)
 		this.pendingStartTask = task
+		this.renewPendingStartView = () => {
+			if (abandoned) return false
+			isSuperseded = this.options.claimTaskViewGeneration()
+			return true
+		}
 		const title = input.prompt.trim().split("\n")[0]?.trim().slice(0, 120) || input.prompt.trim()
 		const repoLabel = input.repoUrl.replace(/^https:\/\/github\.com\//, "")
 
@@ -1025,13 +1045,15 @@ export class SdkCloudSessionCoordinator {
 	// ---- Reopening a task from History ----
 
 	async openCloudTask(sessionId: string): Promise<HistoryItem | undefined> {
-		const displayedTaskId = this.options.getTask()?.taskId
-		const showingPendingStart =
-			!!this.pendingStart &&
-			!!displayedTaskId &&
-			(displayedTaskId.startsWith(CLOUD_PROVISIONING_ID_PREFIX) || displayedTaskId === this.pendingStartSessionId)
-		if (showingPendingStart && (sessionId === displayedTaskId || sessionId === this.pendingStartSessionId)) {
-			// Already showing this start; reopening it would supersede the start and delete its sandbox.
+		const displayed = this.options.getTask()
+		if (
+			displayed &&
+			displayed === this.pendingStartTask &&
+			(sessionId === displayed.taskId || sessionId === this.pendingStartSessionId) &&
+			this.renewPendingStartView?.()
+		) {
+			// Back on the start that is already on screen: it keeps the view, and any
+			// selection still loading since is rejected instead of replacing it.
 			return {
 				id: sessionId,
 				ts: Date.now(),
